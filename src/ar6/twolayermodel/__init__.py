@@ -33,10 +33,12 @@ class TwoLayerModel:
         'cmix':8.2,
         'cdeep':109.0,
         'gamma_2l':0.67,
+        'kappa':0, #Added by Fran, not sure if necessary
         'eff':1.28,
         'extforce':numpy.zeros(2),
         'exttime':numpy.zeros(2),
-        'scm_in':None
+        'scm_in':None,
+        #'gamma_0':0.67, #Added to see if it fixes everything..
         }
         
         
@@ -73,7 +75,7 @@ class TwoLayerModel:
             scm_in (scmpy2l.Results): allows simple model to be re-run with
                 parameters from an existing run, rather than defaults.
         """
-    
+        
         # First update params with defaults
         self.params = self.default.copy()        
 
@@ -93,6 +95,9 @@ class TwoLayerModel:
             t2x=self.params['t2x'],
             lamg=self.params['lamg']
         ) 
+
+        #Not sure how necessary this is, but defining gamma_0 to be gamma_2l
+        #self.params['gamma_0'] = self.params['gamma_2l']
 
         self.params['t2x']   = t2x
         self.params['lamg']  = lamg
@@ -121,7 +126,7 @@ class TwoLayerModel:
         
     def run(self, **kwargs):
         """Runs the two-layer model."""
-        
+
 #        self.params.update(kwargs) # is this necessary?
         tbeg      = self.params['tbeg']
         tend      = self.params['tend']
@@ -170,29 +175,37 @@ class TwoLayerModel:
         # Initialize twolayer model
         twolayer=TwoLayer(
             lamg=self.params['lamg'],
-            gamma=self.params['gamma_2l'],
+            gamma=self.params['gamma_2l'],      #Initializing gamma. 
             cmix=self.params['cmix'],
             cdeep=self.params['cdeep'], 
-            eff=self.params['eff']
+            eff=self.params['eff'],
+            kappa =self.params['kappa'],
+            gamma_0=self.params['gamma_2l']
         )                                    
 
         temp_mix  = numpy.zeros((ntime,2))
         temp_deep = numpy.zeros((ntime,2))
+        gammas = []
  
         for i in range(1,ntime):                                        
             qtot[i] = qext[i] 
+
+            ##Fran's addition: Updating gamma based on temperature differences at previous timestep
+            twolayer.update_gamma(temp_mix[i-1,:], temp_deep[i-1,:])
+            
+            gammas.append(twolayer.params['gamma']) #A list to store gamma values
              
             # Tmix and Tdeep both have two components that need to be updated:
             #    - a fast component, first elements:  Tmix[:,0], Tdeep[:,0]
             #    - a slow component, second elements: Tmix[:,1], Tdeep[:,1]
-            # Actual temperature anomaly is sum of the slow and fast components
+            # Actual temperature anomaly is sum of the slow and fast components 
             
             temp_mix[i,:], temp_deep[i,:], heatflux, del_ohc, lam_eff1 = (
                 twolayer.update(
                     dt, temp_mix[i-1,:], temp_deep[i-1,:], qtot[i-1], qtot[i]
                 )
             )
-                
+
             # Sum fast and slow components
             tlev[i,0]  = numpy.sum(temp_mix[i,:])
             tlev[i,1]  = numpy.sum(temp_deep[i,:])
@@ -214,10 +227,11 @@ class TwoLayerModel:
             time=time,
             ohc=ohc,
             tlev=tlev,
-            tg=tlev[:,0],
+            tg=tlev[:,0], #temp of mixed layer
             hflux=hflux,
             qtot=qtot,
-            lam_eff=lam_eff
+            lam_eff=lam_eff,
+            gammas = gammas
         ) 
 
         return results
@@ -281,7 +295,9 @@ class TwoLayer(object):
         'cmix'   : 8.2,
         'cdeep'  : 109.0,
         'gamma'  : 0.67,
-        'eff'    : 1.28,               
+        'eff'    : 1.28,  
+        'kappa'  : 0, #added by Fran, as a way to tweak gamma  
+        #'gamma_0': 0.67, #added by Fran.. Not sure how neccessary this is..       
         }    
 
 
@@ -304,6 +320,9 @@ class TwoLayer(object):
                 deep layer [units?] from Geoffroy et al., 2013, Part II.
             eff (float): Efficacy of deep ocean from Geoffroy et al., 2013, 
                 Part II.
+            kappa (float): parameter related to tweaking heat exchange coefficient. 
+                Default is zero. 
+            gamma_0 (float): the initial heat exchange coefficent at time 0.
         """
         
         self.params = self.default.copy()
@@ -312,10 +331,10 @@ class TwoLayer(object):
         # care with unit handling
         self.ntoa2joule = 4*math.pi*EARTHRADIUS*EARTHRADIUS*SECPERYEAR*1e-22
         #self.ntoa2joule = 1.6097567742221404    #same as above
-             
+        
         # Define derived constants                
         cdeep_p = self.params['cdeep']*self.params['eff']
-        gamma_p = self.params['gamma']*self.params['eff']
+        gamma_p = self.params['gamma']*self.params['eff'] 
         g1      = (self.params['lamg']+gamma_p)/self.params['cmix'] 
         g2      = gamma_p/cdeep_p
         g       = g1+g2
@@ -348,6 +367,7 @@ class TwoLayer(object):
         self.adeep_s = adeep_s
 
 
+
     def update(self, dt, temp_mix0, temp_deep0, forc0, forc1):
         """Updates two-layer model each timestep.
         
@@ -366,16 +386,19 @@ class TwoLayer(object):
             lam_eff (float): Effective climate feedback parameter this timestep
                 (W m-2 K-1)
         """
-        
-        adf = 1./(self.afast*dt)
+        adf = 1./(self.afast*dt) #gamma dependent. Need to update all parameters
         ads = 1./(self.aslow*dt)
 
-        exp_f   = numpy.exp(-1./adf)
-        exp_s   = numpy.exp(-1./ads)        
-        int_f   = (forc0*adf + forc1*(1.-adf) - exp_f*(forc0*(1.+adf)-forc1*adf))/self.afast
-        int_s   = (forc0*ads + forc1*(1.-ads) - exp_s*(forc0*(1.+ads)-forc1*ads))/self.aslow
+        #Looking at this atm, what are we updating? The timestep is not clear to me..
+        #We are just looking at the integrals. 
+        #If we are solving ODEs, why aren't we just using 4th order Runge-Kutta? 
+        exp_f   = numpy.exp(-1./adf) #for fast component
+        exp_s   = numpy.exp(-1./ads)  #for slow component       
+        int_f   = (forc0*adf + forc1*(1.-adf) - exp_f*(forc0*(1.+adf)-forc1*adf))/self.afast #for fast component
+        int_s   = (forc0*ads + forc1*(1.-ads) - exp_s*(forc0*(1.+ads)-forc1*ads))/self.aslow #for slow component    
 
         # Update [fast,slow] components of Tmix and Tdeep
+        # They both evolve in the same manner... interesting.
         temp_mix1  = numpy.array([exp_f*temp_mix0[0] + self.amix_f*int_f, 
                                   exp_s*temp_mix0[1] + self.amix_s*int_s]) 
                                          
@@ -387,8 +410,9 @@ class TwoLayer(object):
 
         heatflux = c_dtemp/dt
         del_ohc  = self.ntoa2joule * c_dtemp
+
+        faclameff = (self.params['eff']-1.0)*self.params['gamma'] 
         
-        faclameff = (self.params['eff']-1.0)*self.params['gamma']        
         if abs(numpy.sum(temp_mix1)) > 1e-6:
             ratio = ( (numpy.sum(temp_mix1) - numpy.sum(temp_deep1))
                 /numpy.sum(temp_mix1) )
@@ -397,6 +421,60 @@ class TwoLayer(object):
             lam_eff = self.params['lamg'] + faclameff
         
         return temp_mix1, temp_deep1, heatflux, del_ohc, lam_eff
+
+    def update_gamma(self, temp_mix0, temp_deep0):
+        """
+        This method updates gamma and all derived parameters, 
+        based on the temperature difference of the previous timestep.
+        temp_mix0 (float): Temperature of mixed layer at last timestep (K)
+        temp_deep0 (float): Temperature of deep ocean at last timestep (K)
+        
+        Gamma is modelled to depend on the temperature difference between layers to first order as:
+        gamma = gamma_0 (1 - kappa * deltaT)
+        with gamma_0 being the inital set value of gamma
+        
+        """
+
+        #Temperature difference
+        deltaT = numpy.sum(temp_mix0) - numpy.sum(temp_deep0)
+
+        gamma_new = self.params["gamma_0"] * (1 - self.params["kappa"] * deltaT)
+        
+        self.params.update({'gamma': gamma_new})
+
+        cdeep_p = self.params['cdeep']*self.params['eff']
+        gamma_p = self.params['gamma']*self.params['eff'] 
+        
+        g1      = (self.params['lamg']+gamma_p)/self.params['cmix'] 
+        g2      = gamma_p/cdeep_p
+        g       = g1+g2
+        gstar   = g1-g2
+        delsqrt = numpy.sqrt(g*g - 4*g2*self.params['lamg']/self.params['cmix'])
+        afast   = (g + delsqrt)/2.
+        aslow   = (g - delsqrt)/2.        
+        cc      = 0.5/(self.params['cmix']*delsqrt)        
+        amix_f  = cc*(gstar+delsqrt)
+        amix_s  = -cc*(gstar-delsqrt)        
+        adeep_f = -gamma_p/(self.params['cmix']*cdeep_p*delsqrt)
+        adeep_s = -adeep_f                                            
+        self.params.update({
+            'afast'  : afast,
+            'aslow'  : aslow,
+            'amix_f' : amix_f,
+            'amix_s' : amix_s,
+            'adeep_f': adeep_f,
+            'adeep_s': adeep_s
+        })
+        for k in self.params.keys():
+            if self.params[k] == None:
+                 if k in self.default:
+                    self.params[k] = self.default[k]
+        self.afast   = afast
+        self.aslow   = aslow
+        self.amix_f  = amix_f
+        self.amix_s  = amix_s
+        self.adeep_f = adeep_f
+        self.adeep_s = adeep_s
 
 
 def input_type_check(inp, name):
