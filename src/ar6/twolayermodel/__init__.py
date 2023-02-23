@@ -38,7 +38,6 @@ class TwoLayerModel:
         'extforce':numpy.zeros(2),
         'exttime':numpy.zeros(2),
         'scm_in':None,
-        #'gamma_0':0.67, #Added to see if it fixes everything..
         }
         
         
@@ -95,9 +94,6 @@ class TwoLayerModel:
             t2x=self.params['t2x'],
             lamg=self.params['lamg']
         ) 
-
-        #Not sure how necessary this is, but defining gamma_0 to be gamma_2l
-        #self.params['gamma_0'] = self.params['gamma_2l']
 
         self.params['t2x']   = t2x
         self.params['lamg']  = lamg
@@ -296,8 +292,7 @@ class TwoLayer(object):
         'cdeep'  : 109.0,
         'gamma'  : 0.67,
         'eff'    : 1.28,  
-        'kappa'  : 0, #added by Fran, as a way to tweak gamma  
-        #'gamma_0': 0.67, #added by Fran.. Not sure how neccessary this is..       
+        'kappa'  : 0, #added by Fran, as a way to tweak gamma      
         }    
 
 
