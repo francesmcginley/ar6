@@ -34,6 +34,7 @@ class TwoLayerModel:
         'cdeep':109.0,
         'gamma_2l':0.67,
         'kappa':0, #Added by Fran, not sure if necessary
+        'sigma':-numpy.inf,
         'eff':1.28,
         'extforce':numpy.zeros(2),
         'exttime':numpy.zeros(2),
@@ -176,7 +177,8 @@ class TwoLayerModel:
             cdeep=self.params['cdeep'], 
             eff=self.params['eff'],
             kappa =self.params['kappa'],
-            gamma_0=self.params['gamma_2l']
+            gamma_0=self.params['gamma_2l'],
+            sigma=self.params['sigma']
         )                                    
 
         temp_mix  = numpy.zeros((ntime,2))
@@ -292,7 +294,8 @@ class TwoLayer(object):
         'cdeep'  : 109.0,
         'gamma'  : 0.67,
         'eff'    : 1.28,  
-        'kappa'  : 0, #added by Fran, as a way to tweak gamma      
+        'kappa'  : 0, #added by Fran, as a way to tweak gamma 
+        'sigma'  :-numpy.inf,    #added by Fran, for gamma threshold, default is no threshold
         }    
 
 
@@ -427,6 +430,9 @@ class TwoLayer(object):
         Gamma is modelled to depend on the temperature difference between layers to first order as:
         gamma = gamma_0 (1 - kappa * deltaT)
         with gamma_0 being the inital set value of gamma
+
+        A threshold for gamma is also introduced. 
+        If gamma/gamma_0 > sigma, we do not update gamma.
         
         """
 
@@ -434,8 +440,12 @@ class TwoLayer(object):
         deltaT = numpy.sum(temp_mix0) - numpy.sum(temp_deep0)
 
         gamma_new = self.params["gamma_0"] * (1 - self.params["kappa"] * deltaT)
-        
-        self.params.update({'gamma': gamma_new})
+        #print(self.params["sigma"])
+
+        if (gamma_new / self.params["gamma_0"]) > self.params["sigma"]:               #threshold for gamma.
+            self.params.update({'gamma': gamma_new})
+            if self.params['gamma'] < 0:
+                raise Exception("Negative gamma, try a smaller value of kappa.")
 
         cdeep_p = self.params['cdeep']*self.params['eff']
         gamma_p = self.params['gamma']*self.params['eff'] 
